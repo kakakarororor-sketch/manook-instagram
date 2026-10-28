@@ -1,7 +1,10 @@
 name: publish
 on:
   schedule:
-    - cron: '0 * * * *'
+    # Off the top of the hour: GitHub delays/drops scheduled runs at :00 most often.
+    - cron: '17 * * * *'
+    # Wednesday 20:00 JST posting slot (11:00 UTC): extra tries so one late/dropped run doesn't skip the post.
+    - cron: '2,8,25,40,55 11 * * 3'
   workflow_dispatch:
     inputs:
       dry_run:
