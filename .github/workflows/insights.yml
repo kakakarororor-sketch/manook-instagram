@@ -1,0 +1,29 @@
+name: insights
+on:
+  schedule:
+    # Monday 07:23 JST (Sunday 22:23 UTC); off the top of the hour to avoid GitHub delays.
+    - cron: '23 22 * * 0'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: instagram-insights
+jobs:
+  insights:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch insights
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: node scripts/insights.mjs --out=insights-out
+      # Public repo: results are NOT committed, only kept as an artifact (90 days).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: insights
+          path: insights-out/
+          retention-days: 90
