@@ -25,6 +25,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install ffprobe (only when a reel is queued)
+        run: |
+          if find queue -name reel.mp4 | grep -q .; then npm ci --no-audit --no-fund; fi
       - name: Publish oldest due post
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}

@@ -1,0 +1,12 @@
+{
+  "name": "manook-instagram",
+  "private": true,
+  "type": "module",
+  "description": "Auto-posting to @manook_official (GitHub Actions). Only dev tooling is installed; scripts have no runtime dependencies except ffprobe-static for reel checks.",
+  "scripts": {
+    "test": "node --test scripts/test-dry.mjs scripts/test-insights.mjs"
+  },
+  "devDependencies": {
+    "ffprobe-static": "3.1.0"
+  }
+}

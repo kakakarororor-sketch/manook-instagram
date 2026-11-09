@@ -4,13 +4,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { selectDue, loadPost } from './lib.mjs';
+import { selectDue, loadPost, probeVideo, checkVideoInfo } from './lib.mjs';
 
 const API = 'https://graph.instagram.com/v26.0';
 const EXPECTED_USERNAME = 'manook_official';
 const REPO = process.env.GITHUB_REPOSITORY || 'kakakarororor-sketch/manook-instagram';
 const POLL_INTERVAL_MS = 10_000;
 const POLL_TIMEOUT_MS = 5 * 60_000;
+const VIDEO_POLL_TIMEOUT_MS = 8 * 60_000; // the job itself times out at 15 min
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -41,24 +42,27 @@ async function api(method, p, params = {}, soft = false) {
   return json;
 }
 
-async function waitFinished(id, label) {
+async function waitFinished(id, label, timeoutMs = POLL_TIMEOUT_MS) {
   const start = Date.now();
   for (;;) {
     const { status_code, status } = await api('GET', id, { fields: 'status_code,status' });
     if (status_code === 'FINISHED') return;
     if (['ERROR', 'EXPIRED'].includes(status_code)) fail(`${label} container ${id} ended with ${status_code}: ${status || ''}`);
-    if (Date.now() - start > POLL_TIMEOUT_MS) fail(`${label} container ${id} still ${status_code} after ${POLL_TIMEOUT_MS / 1000}s (timeout)`);
+    if (Date.now() - start > timeoutMs) fail(`${label} container ${id} still ${status_code} after ${timeoutMs / 1000}s (timeout)`);
     await sleep(POLL_INTERVAL_MS);
   }
 }
 
-async function checkUrl(url) {
+async function checkUrl(url, kind = 'image') {
   let res;
   try { res = await fetch(url, { method: 'GET' }); } catch (e) { fail(`Cannot fetch ${url}: ${e.message}`); }
   const ct = res.headers.get('content-type') || '';
   await res.arrayBuffer();
-  if (res.status !== 200) fail(`Image URL returned HTTP ${res.status}: ${url} (is the folder pushed to GitHub at this commit?)`);
-  if (!/^image\/jpe?g/i.test(ct)) fail(`Image URL has content-type "${ct}", expected image/jpeg: ${url}`);
+  if (res.status !== 200) fail(`${kind} URL returned HTTP ${res.status}: ${url} (is the folder pushed to GitHub at this commit?)`);
+  if (kind === 'video') {
+    // raw.githubusercontent.com may label mp4 as octet-stream; only HTTP 200 is a hard requirement.
+    if (!/^video\//i.test(ct)) console.warn(`WARNING: video URL content-type is "${ct}" (not video/*). Instagram may still accept it.`);
+  } else if (!/^image\/jpe?g/i.test(ct)) fail(`Image URL has content-type "${ct}", expected image/jpeg: ${url}`);
 }
 
 function commitSha() {
@@ -74,18 +78,28 @@ async function main() {
   console.log(`Due: ${due.length} post(s). Processing oldest: ${target.name}${due.length > 1 ? ` (${due.length - 1} more waiting)` : ''}`);
 
   const dir = path.join(QUEUE, target.name);
-  const { images, caption, problems } = loadPost(dir);
+  const { kind, images, video, cover, caption, problems } = loadPost(dir);
   if (problems.length) fail(`Validation failed for ${target.name}:\n - ${problems.join('\n - ')}`);
 
   const sha = commitSha();
-  const urls = images.map((f) => `https://raw.githubusercontent.com/${REPO}/${sha}/queue/${target.name}/${f}`);
-  console.log(`Images (${images.length}): ${images.join(', ')}`);
+  const urlOf = (f) => `https://raw.githubusercontent.com/${REPO}/${sha}/queue/${target.name}/${f}`;
+  const isReel = kind === 'reel';
+  const urls = isReel ? [urlOf(video), urlOf(cover)] : images.map(urlOf);
+  if (isReel) {
+    let probed;
+    try { probed = await probeVideo(path.join(dir, video)); } catch (e) { fail(e.message); }
+    console.log(`Reel: ${video} (${probed.summary}), cover: ${cover}`);
+    const vp = checkVideoInfo(probed.info);
+    if (vp.length) fail(`Video check failed for ${target.name}:\n - ${vp.join('\n - ')}`);
+  } else {
+    console.log(`Images (${images.length}): ${images.join(', ')}`);
+  }
   console.log(`Caption: ${[...caption].length} chars`);
 
-  if (CHECK_URLS) for (const u of urls) await checkUrl(u);
+  if (CHECK_URLS) for (const [i, u] of urls.entries()) await checkUrl(u, isReel && i === 0 ? 'video' : 'image');
 
   if (DRY) {
-    console.log(`[dry-run] Would post as ${images.length === 1 ? 'single image' : `carousel of ${images.length}`} to @${EXPECTED_USERNAME}:`);
+    console.log(`[dry-run] Would post as ${isReel ? 'reel (REELS, share_to_feed)' : images.length === 1 ? 'single image' : `carousel of ${images.length}`} to @${EXPECTED_USERNAME}:`);
     urls.forEach((u) => console.log(`  ${u}`));
     console.log('[dry-run] Validation OK. No Instagram API calls were made.');
     return;
@@ -97,7 +111,10 @@ async function main() {
   const igId = me.user_id || me.id;
 
   let creationId;
-  if (urls.length === 1) {
+  if (isReel) {
+    creationId = (await api('POST', `${igId}/media`, { media_type: 'REELS', video_url: urls[0], cover_url: urls[1], caption, share_to_feed: 'true' })).id;
+    await waitFinished(creationId, 'Reel', VIDEO_POLL_TIMEOUT_MS);
+  } else if (urls.length === 1) {
     creationId = (await api('POST', `${igId}/media`, { image_url: urls[0], caption })).id;
   } else {
     const children = [];
@@ -108,7 +125,7 @@ async function main() {
     for (const c of children) await waitFinished(c, 'Carousel item');
     creationId = (await api('POST', `${igId}/media`, { media_type: 'CAROUSEL', children: children.join(','), caption })).id;
   }
-  await waitFinished(creationId, 'Post');
+  if (!isReel) await waitFinished(creationId, 'Post');
   const published = await api('POST', `${igId}/media_publish`, { creation_id: creationId });
   const mediaId = published.id;
   console.log(`Published media id ${mediaId}`);
@@ -122,7 +139,8 @@ async function main() {
   const dest = path.join(POSTED, target.name);
   try { execFileSync('git', ['mv', dir, dest], { stdio: 'inherit' }); } catch { fs.renameSync(dir, dest); }
   fs.writeFileSync(path.join(dest, 'result.json'), JSON.stringify({
-    media_id: mediaId, permalink, published_at: new Date().toISOString(), scheduled_for_jst: target.name.slice(0, 15), image_count: images.length,
+    media_id: mediaId, permalink, published_at: new Date().toISOString(), scheduled_for_jst: target.name.slice(0, 15),
+    ...(isReel ? { media_type: 'REELS' } : { image_count: images.length }),
   }, null, 2) + '\n');
   console.log(`Moved to posted/${target.name}. Permalink: ${permalink}`);
 }

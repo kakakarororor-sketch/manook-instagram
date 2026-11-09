@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 // Local helper: convert a post folder (NN.png + caption.md) into queue/<datetime>_<slug>/ (NN.jpg + caption.txt).
+// A folder with reel.mp4 + cover.jpg + caption.md is queued as a reel (files are copied as-is; video is checked with ffprobe).
 // Usage: node scripts/add-to-queue.mjs <post-folder> <YYYY-MM-DD_HHMM (JST)> <ascii-slug>
 // Converter: ImageMagick ("magick") if installed, otherwise PowerShell System.Drawing on Windows.
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { parseFolderName, extractCaptionFromMarkdown, loadPost } from './lib.mjs';
+import { parseFolderName, extractCaptionFromMarkdown, loadPost, probeVideo, checkVideoInfo } from './lib.mjs';
 
 const [src, when, slug] = process.argv.slice(2);
 if (!src || !when || !slug) { console.error('Usage: node scripts/add-to-queue.mjs <post-folder> <YYYY-MM-DD_HHMM> <slug>'); process.exit(1); }
 const name = `${when}_${slug}`;
 if (!parseFolderName(name)) { console.error(`Invalid folder name "${name}". Use YYYY-MM-DD_HHMM (JST) and an ASCII slug.`); process.exit(1); }
 
-const pngs = fs.readdirSync(src).filter((f) => /\.png$/i.test(f)).sort();
-if (pngs.length < 1 || pngs.length > 10) { console.error(`Expected 1-10 PNG files in ${src}, found ${pngs.length}`); process.exit(1); }
+const isReel = fs.existsSync(path.join(src, 'reel.mp4'));
+const pngs = isReel ? [] : fs.readdirSync(src).filter((f) => /\.png$/i.test(f)).sort();
+if (!isReel && (pngs.length < 1 || pngs.length > 10)) { console.error(`Expected 1-10 PNG files in ${src}, found ${pngs.length}`); process.exit(1); }
 const mdPath = path.join(src, 'caption.md');
 const txtPath = path.join(src, 'caption.txt');
 let caption;
@@ -29,6 +31,13 @@ function hasMagick() { try { execFileSync('magick', ['-version'], { stdio: 'igno
 const magick = hasMagick();
 const ps = (s) => s.replaceAll("'", "''");
 
+if (isReel) {
+  for (const f of ['reel.mp4', 'cover.jpg']) {
+    if (!fs.existsSync(path.join(src, f))) { console.error(`${f} not found in ${src}`); process.exit(1); }
+    fs.copyFileSync(path.join(src, f), path.join(dest, f));
+    console.log(`copied ${f}`);
+  }
+}
 for (const f of pngs) {
   const out = path.resolve(dest, f.replace(/\.png$/i, '.jpg'));
   const inp = path.resolve(src, f);
@@ -50,5 +59,9 @@ for (const f of pngs) {
 fs.writeFileSync(path.join(dest, 'caption.txt'), caption.replace(/\r\n/g, '\n').trim() + '\n');
 
 const { problems } = loadPost(dest);
+if (isReel) {
+  try { problems.push(...checkVideoInfo((await probeVideo(path.join(dest, 'reel.mp4'))).info)); }
+  catch (e) { problems.push(e.message); }
+}
 if (problems.length) { console.error(`Created ${dest} but validation failed:\n - ${problems.join('\n - ')}`); process.exit(1); }
 console.log(`OK: ${dest}\nNext: git add queue && git commit -m "queue: ${name}" && git push`);
