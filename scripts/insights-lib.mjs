@@ -12,6 +12,16 @@ export const WINDOWS_DAYS = [7, 28];
 export const DEMOGRAPHIC_BREAKDOWNS = ['age', 'gender', 'city', 'country'];
 // Per-post metrics. Not every metric exists for every media type; unsupported ones are recorded and skipped.
 export const MEDIA_METRICS = ['reach', 'views', 'likes', 'comments', 'saved', 'shares', 'total_interactions', 'profile_visits', 'follows'];
+// Reels do not support profile_visits/follows (HTTP 400 code=100); they have watch-time metrics instead (milliseconds).
+export const REEL_UNSUPPORTED_METRICS = ['profile_visits', 'follows'];
+export const REEL_EXTRA_METRICS = ['ig_reels_avg_watch_time', 'ig_reels_video_view_total_time'];
+export const isReel = (media) => media?.media_product_type === 'REELS';
+
+/** Metrics to request for one media item. */
+export function metricsFor(media) {
+  if (!isReel(media)) return MEDIA_METRICS;
+  return [...MEDIA_METRICS.filter((m) => !REEL_UNSUPPORTED_METRICS.includes(m)), ...REEL_EXTRA_METRICS];
+}
 
 export class InsightsError extends Error {
   constructor(message, { kind = 'api', status, code, raw } = {}) {
@@ -127,14 +137,14 @@ export async function listMedia(client, igId) {
 
 export async function fetchMediaInsights(client, media, errors) {
   const metrics = {};
-  for (const m of MEDIA_METRICS) {
+  for (const m of metricsFor(media)) {
     const r = await soft(errors, `media.${media.id}.${m}`, () => client.get(`${media.id}/insights`, { metric: m }));
     const item = r?.data?.[0];
     if (item?.values?.[0] && 'value' in item.values[0]) metrics[item.name] = item.values[0].value;
     else if (item?.total_value) metrics[item.name] = item.total_value.value;
   }
   return {
-    id: media.id, timestamp: media.timestamp, permalink: media.permalink, type: media.media_type,
+    id: media.id, timestamp: media.timestamp, permalink: media.permalink, type: media.media_type, product_type: media.media_product_type ?? null,
     caption_head: (media.caption || '').split('\n')[0].slice(0, 60),
     like_count: media.like_count ?? null, comments_count: media.comments_count ?? null,
     metrics,
@@ -156,6 +166,9 @@ const JST = 9 * 3600 * 1000;
 const jst = (iso) => (iso ? new Date(new Date(iso).getTime() + JST).toISOString().slice(0, 16).replace('T', ' ') : '-');
 const n = (v) => (v === undefined || v === null ? '-' : String(v));
 
+/** milliseconds -> seconds with 1 decimal; '-' when missing. */
+export const sec = (ms) => (typeof ms === 'number' && Number.isFinite(ms) ? (ms / 1000).toFixed(1) : '-');
+
 export function renderMarkdown(data) {
   const L = [];
   const a = data.account || {};
@@ -172,10 +185,10 @@ export function renderMarkdown(data) {
     L.push('', `### ${metric}`);
     for (const [b, rows] of Object.entries(byB)) L.push(`- ${b}: ` + rows.slice().sort((x, y) => y.value - x.value).slice(0, 8).map((r) => `${r.key}=${r.value}`).join(', '));
   }
-  L.push('', '## 投稿ごと', '', '| 投稿日(JST) | 種類 | 冒頭 | リーチ | 表示 | いいね | コメント | 保存 | シェア | 合計やりとり | プロフィール | フォロー | リンク |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  L.push('', '## 投稿ごと', '', '| 投稿日(JST) | 種類 | 冒頭 | リーチ | 表示 | いいね | コメント | 保存 | シェア | 合計やりとり | プロフィール | フォロー | 平均視聴(秒) | 合計視聴(秒) | リンク |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const p of data.posts || []) {
     const m = p.metrics || {};
-    L.push(`| ${jst(p.timestamp)} | ${p.type} | ${(p.caption_head || '').replace(/\|/g, '/')} | ${n(m.reach)} | ${n(m.views)} | ${n(m.likes ?? p.like_count)} | ${n(m.comments ?? p.comments_count)} | ${n(m.saved)} | ${n(m.shares)} | ${n(m.total_interactions)} | ${n(m.profile_visits)} | ${n(m.follows)} | ${p.permalink ?? '-'} |`);
+    L.push(`| ${jst(p.timestamp)} | ${p.type} | ${(p.caption_head || '').replace(/\|/g, '/')} | ${n(m.reach)} | ${n(m.views)} | ${n(m.likes ?? p.like_count)} | ${n(m.comments ?? p.comments_count)} | ${n(m.saved)} | ${n(m.shares)} | ${n(m.total_interactions)} | ${n(m.profile_visits)} | ${n(m.follows)} | ${sec(m.ig_reels_avg_watch_time)} | ${sec(m.ig_reels_video_view_total_time)} | ${p.permalink ?? '-'} |`);
   }
   if (data.errors?.length) {
     L.push('', '## 取得できなかった項目', '');

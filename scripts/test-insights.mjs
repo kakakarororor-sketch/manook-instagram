@@ -1,7 +1,7 @@
 // Offline tests: node --test scripts/test-insights.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collect, renderMarkdown, classifyError, makeClient, pickTotal, InsightsError } from './insights-lib.mjs';
+import { metricsFor, sec, collect, renderMarkdown, classifyError, makeClient, pickTotal, InsightsError } from './insights-lib.mjs';
 
 const TOKEN = 'SECRET_TOKEN_123';
 const ok = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
@@ -71,4 +71,34 @@ test('classifyError / pickTotal', () => {
   assert.equal(classifyError(400, { error: { code: 100, message: 'x' } }).kind, 'unsupported');
   assert.deepEqual(pickTotal({ total_value: { value: 3, breakdowns: [{ results: [{ dimension_values: ['F', '18-24'], value: 2 }] }] } }), { value: 3, breakdown: [{ key: 'F/18-24', value: 2 }] });
   assert.equal(pickTotal({}), null);
+});
+
+test('reels: skip profile_visits/follows, request watch time, ms->s in markdown, raw in data', async () => {
+  const requested = [];
+  const f = fakeFetch((p, q) => {
+    if (p === '1') return ok({ username: 'x' });
+    if (p === '1/media') return ok({ data: [
+      { id: 'r1', media_type: 'VIDEO', media_product_type: 'REELS', timestamp: '2026-11-11T00:00:00+0000', permalink: 'https://x/r' },
+      { id: 'c1', media_type: 'CAROUSEL_ALBUM', media_product_type: 'FEED', timestamp: '2026-11-01T00:00:00+0000', permalink: 'https://x/c' },
+    ] });
+    if (p === '1/insights') return bad(400, { code: 100, message: 'metric not supported' });
+    requested.push(`${p}:${q.metric}`);
+    if (p === 'r1/insights' && q.metric === 'ig_reels_video_view_total_time') return bad(400, { code: 100, message: 'metric not supported' });
+    if (p === 'r1/insights' && q.metric === 'ig_reels_avg_watch_time') return ok({ data: [{ name: q.metric, values: [{ value: 4567 }] }] });
+    return ok({ data: [{ name: q.metric, values: [{ value: 3 }] }] });
+  });
+  const d = await collect({ token: TOKEN, igId: '1', now: new Date('2026-11-12T00:00:00Z'), fetchFn: f });
+  assert.ok(!requested.includes('r1/insights:profile_visits') && !requested.includes('r1/insights:follows'));
+  assert.ok(requested.includes('c1/insights:profile_visits'));
+  assert.ok(!requested.includes('c1/insights:ig_reels_avg_watch_time'));
+  const r = d.posts.find((p) => p.id === 'r1');
+  assert.equal(r.metrics.ig_reels_avg_watch_time, 4567);
+  assert.ok(d.errors.some((e) => e.target === 'media.r1.ig_reels_video_view_total_time' && e.kind === 'unsupported'));
+  assert.ok(!d.errors.some((e) => /r1\.(profile_visits|follows)/.test(e.target)));
+  const md = renderMarkdown(d);
+  assert.match(md, /平均視聴\(秒\) \| 合計視聴\(秒\)/);
+  assert.match(md, /\| 4\.6 \| - \| https:\/\/x\/r \|/);
+  assert.equal(sec(12345), '12.3');
+  assert.equal(sec(undefined), '-');
+  assert.equal(metricsFor({ media_product_type: 'FEED' }).includes('follows'), true);
 });
